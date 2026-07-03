@@ -1,0 +1,16 @@
+services:
+  infernal-gibberlink:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      GIBBERLINK_INPUT_DIR: /data/input
+      GIBBERLINK_ALLOWED_ROOTS: /data/input
+      GIBBERLINK_MAX_FILE_BYTES: "524288"
+      GIBBERLINK_MAX_FILES: "250"
+      GIBBERLINK_MAX_DEPTH: "6"
+      GIBBERLINK_MAX_WAV_TEXT_BYTES: "786432"
+    volumes:
+      - ./samples:/data/input:ro
+    restart: unless-stopped

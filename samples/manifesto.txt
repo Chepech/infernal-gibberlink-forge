@@ -1,0 +1,4 @@
+The forge awakens.
+This sample TXT file is mounted into /data/input by docker-compose.
+Scan the folder, select this file, and forge it into an audible gibberlink carrier.
+No external service is contacted. The signal is born here.
