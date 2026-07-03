@@ -37,20 +37,11 @@ type TextDocument = LocalTextFile & {
   lineCount: number;
 };
 
-type ScanResponse = {
-  folder: string;
-  files: LocalTextFile[];
-  skipped: { path: string; reason: string }[];
-  limits: {
-    maxFileBytes: number;
-    maxFiles: number;
-    maxDepth: number;
-  };
-};
+type SkippedItem = { path: string; reason: string };
 
 type ReadResponse = {
   documents: TextDocument[];
-  skipped: { path: string; reason: string }[];
+  skipped: SkippedItem[];
   totalBytes: number;
 };
 
@@ -68,23 +59,24 @@ type StatusEvent = {
 export function InfernalTranslator() {
   const [locale, setLocale] = useState<Locale>("en");
   const [runtime, setRuntime] = useState<RuntimeConfig | null>(null);
-  const [folder, setFolder] = useState("");
   const [files, setFiles] = useState<LocalTextFile[]>([]);
-  const [skipped, setSkipped] = useState<ScanResponse["skipped"]>([]);
+  const [skipped, setSkipped] = useState<SkippedItem[]>([]);
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [translation, setTranslation] = useState<Translation | null>(null);
-  const [busy, setBusy] = useState<"scan" | "translate" | "audio" | null>(null);
+  const [busy, setBusy] = useState<"translate" | "audio" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [events, setEvents] = useState<StatusEvent[]>([{ key: "ready" }]);
   const [isPlaying, setIsPlaying] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
 
+  const [activeTab, setActiveTab] = useState<"chat" | "upload">("chat");
+  const [chatText, setChatText] = useState("");
+
   const [uploadId, setUploadId] = useState<string | null>(null);
   const [uploadBusy, setUploadBusy] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
   const [uploadExpiry, setUploadExpiry] = useState<string | null>(null);
-  const [uploadPanelOpen, setUploadPanelOpen] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSummary, setUploadSummary] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -114,7 +106,6 @@ export function InfernalTranslator() {
       try {
         const config = await requestJson<RuntimeConfig>("/api/runtime");
         setRuntime(config);
-        setFolder(config.defaultFolder);
       } catch (loadError) {
         setError(loadError instanceof Error ? loadError.message : "Unable to load runtime config.");
       }
@@ -212,10 +203,9 @@ export function InfernalTranslator() {
         const payload = await safeJson<{ error?: { message?: string } }>(sessionRes);
         throw new Error(payload?.error?.message ?? t.uploadError);
       }
-      const sessionData = (await sessionRes.json()) as { folder: string; files: LocalTextFile[] };
+      const sessionData = (await sessionRes.json()) as { files: LocalTextFile[] };
 
       // Step 4: Hand off to the existing forge flow
-      setFolder(sessionData.folder);
       setFiles(sessionData.files);
       setSelectedPaths(sessionData.files.map((f) => f.path));
       setSkipped([]);
@@ -225,7 +215,7 @@ export function InfernalTranslator() {
 
       const summary = t.uploadFilesReady.replace("{count}", String(sessionData.files.length));
       setUploadSummary(summary);
-      pushEvent("scanDone", `${sessionData.files.length} ${t.files.toLowerCase()}`);
+      pushEvent("uploadDone", `${sessionData.files.length} ${t.files.toLowerCase()}`);
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : t.uploadError);
     } finally {
@@ -246,27 +236,23 @@ export function InfernalTranslator() {
     setUploadError(null);
   }
 
-  async function scanFolder() {
-    setBusy("scan");
+  function forgeFromChatText() {
+    const trimmed = chatText.trim();
+    if (!trimmed) {
+      setError(t.noText);
+      return;
+    }
+
     setError(null);
-    setTranslation(null);
     stopAudio();
     revokeAudioUrl();
 
-    try {
-      const result = await requestJson<ScanResponse>(
-        `/api/folders/scan?folder=${encodeURIComponent(folder)}`,
-      );
-      setFolder(result.folder);
-      setFiles(result.files);
-      setSkipped(result.skipped);
-      setSelectedPaths(result.files.map((file) => file.path));
-      pushEvent("scanDone", `${result.files.length} ${t.files.toLowerCase()}`);
-    } catch (scanError) {
-      setError(scanError instanceof Error ? scanError.message : "Folder scan failed.");
-    } finally {
-      setBusy(null);
-    }
+    const packet = encodeTextToGibberlink(trimmed);
+    setFiles([]);
+    setSelectedPaths([]);
+    setSkipped([]);
+    setTranslation({ text: trimmed, documents: [], packet });
+    pushEvent("forgeDone", formatDuration(packet.durationSeconds));
   }
 
   async function forgeGibberlink() {
@@ -448,39 +434,68 @@ export function InfernalTranslator() {
 
         <section className="grid gap-6 xl:grid-cols-[0.82fr_1.18fr]">
           <div className="space-y-6">
-            {/* Upload Files panel */}
+            {/* Chat / Upload panel */}
             <section className="brutal-panel p-5 sm:p-6">
-              <button
-                className="flex w-full items-center justify-between gap-3"
-                onClick={() => setUploadPanelOpen((prev) => !prev)}
-                aria-expanded={uploadPanelOpen}
-              >
-                <p className="text-xs font-black uppercase tracking-[0.35em] text-red-400">{t.uploadSectionTitle}</p>
-                <span className="text-xs font-black uppercase tracking-widest text-zinc-500">
-                  {uploadPanelOpen ? "▲" : "▼"}
-                </span>
-              </button>
+              <div className="flex gap-2" role="tablist">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === "chat"}
+                  className={activeTab === "chat" ? "hell-button min-h-10 px-5 text-sm" : "micro-button min-h-10 px-5 text-sm"}
+                  onClick={() => setActiveTab("chat")}
+                >
+                  {t.chatTab}
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === "upload"}
+                  className={activeTab === "upload" ? "hell-button min-h-10 px-5 text-sm" : "micro-button min-h-10 px-5 text-sm"}
+                  onClick={() => setActiveTab("upload")}
+                >
+                  {t.uploadTab}
+                </button>
+              </div>
 
-              {uploadPanelOpen ? (
+              {/* Hidden file inputs — always mounted so refs work regardless of active tab */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept=".txt,.md,.json,.csv"
+                className="hidden"
+                onChange={(e) => { if (e.target.files) void handleUploadFiles(e.target.files); e.target.value = ""; }}
+              />
+              <input
+                ref={folderInputRef}
+                type="file"
+                // @ts-expect-error — webkitdirectory is non-standard but widely supported
+                webkitdirectory=""
+                className="hidden"
+                onChange={(e) => { if (e.target.files) void handleUploadFiles(e.target.files); e.target.value = ""; }}
+              />
+
+              {activeTab === "chat" ? (
                 <div className="mt-4 space-y-4">
-                  {/* Hidden file inputs */}
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    multiple
-                    accept=".txt,.md,.json,.csv"
-                    className="hidden"
-                    onChange={(e) => { if (e.target.files) void handleUploadFiles(e.target.files); e.target.value = ""; }}
+                  <textarea
+                    className="min-h-[180px] w-full border border-red-950/80 bg-black/80 p-4 font-mono text-sm text-zinc-100 outline-none ring-red-600/20 placeholder:text-zinc-600 focus:ring-4"
+                    value={chatText}
+                    onChange={(event) => setChatText(event.target.value)}
+                    placeholder={t.chatPlaceholder}
                   />
-                  <input
-                    ref={folderInputRef}
-                    type="file"
-                    // @ts-expect-error — webkitdirectory is non-standard but widely supported
-                    webkitdirectory=""
-                    className="hidden"
-                    onChange={(e) => { if (e.target.files) void handleUploadFiles(e.target.files); e.target.value = ""; }}
-                  />
-
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <button
+                      className="hell-button min-h-12 px-5"
+                      disabled={chatText.trim().length === 0}
+                      onClick={forgeFromChatText}
+                    >
+                      {t.chatUseText}
+                    </button>
+                    <p className="text-sm text-zinc-400">{t.chatHelp}</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-4 space-y-4">
                   {/* Drop zone */}
                   <div
                     className="flex min-h-[120px] cursor-pointer flex-col items-center justify-center gap-3 border border-dashed border-red-900/50 bg-black/40 p-6 text-center transition hover:border-red-700"
@@ -547,39 +562,17 @@ export function InfernalTranslator() {
                   {uploadError ? (
                     <p className="text-xs font-bold text-red-400">{uploadError}</p>
                   ) : null}
-                </div>
-              ) : null}
-            </section>
 
-            <section className="brutal-panel p-5 sm:p-6">
-              <label className="text-xs font-black uppercase tracking-[0.35em] text-red-400" htmlFor="folder">
-                {t.folderLabel}
-              </label>
-              <div className="mt-3 flex flex-col gap-3 sm:flex-row">
-                <input
-                  id="folder"
-                  className="min-h-12 flex-1 border border-red-950/80 bg-black/80 px-4 font-mono text-sm text-zinc-100 outline-none ring-red-600/20 placeholder:text-zinc-600 focus:ring-4"
-                  value={folder}
-                  onChange={(event) => setFolder(event.target.value)}
-                  placeholder="/data/input"
-                />
-                <button className="hell-button min-h-12 px-5" disabled={busy === "scan"} onClick={scanFolder}>
-                  {busy === "scan" ? t.scanning : t.scan}
-                </button>
-              </div>
-              <p className="mt-3 text-sm text-zinc-400">{t.folderHelp}</p>
-              {runtime ? (
-                <div className="mt-4 grid gap-3 text-xs text-zinc-400 sm:grid-cols-2">
-                  <div className="border border-zinc-800 bg-black/40 p-3">
-                    <span className="block font-black uppercase text-zinc-200">{t.allowedRoots}</span>
-                    <span className="mt-1 block break-all font-mono">{runtime.allowedRoots.join(", ")}</span>
-                  </div>
-                  <div className="border border-zinc-800 bg-black/40 p-3">
-                    <span className="block font-black uppercase text-zinc-200">{t.maxFileBytes}</span>
-                    <span className="mt-1 block font-mono">{formatBytes(runtime.maxFileBytes)}</span>
-                  </div>
+                  {runtime ? (
+                    <div className="grid gap-3 text-xs text-zinc-400 sm:grid-cols-2">
+                      <div className="border border-zinc-800 bg-black/40 p-3">
+                        <span className="block font-black uppercase text-zinc-200">{t.maxFileBytes}</span>
+                        <span className="mt-1 block font-mono">{formatBytes(runtime.maxFileBytes)}</span>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
-              ) : null}
+              )}
             </section>
 
             <section className="brutal-panel p-5 sm:p-6">
@@ -675,7 +668,7 @@ export function InfernalTranslator() {
                   <h2 className="mt-1 text-2xl font-black uppercase tracking-[-0.04em]">{t.waveform}</h2>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <button className="micro-button" disabled={!translation || busy === "audio"} onClick={playOrStop}>
+                  <button className="micro-button min-w-[5.5rem]" disabled={!translation || busy === "audio"} onClick={playOrStop}>
                     {isPlaying ? t.stop : t.play}
                   </button>
                   <button className="micro-button" disabled={!translation || busy === "audio"} onClick={downloadWav}>
@@ -689,6 +682,8 @@ export function InfernalTranslator() {
                   <WaveformCanvas
                     symbols={translation.packet.symbols}
                     durationSeconds={translation.packet.durationSeconds}
+                    isPlaying={isPlaying}
+                    audioRef={audioRef}
                   />
                 ) : (
                   <div className="grid min-h-[260px] place-items-center border border-dashed border-zinc-800 bg-black/50 p-8 text-center text-sm uppercase tracking-[0.3em] text-zinc-500">
@@ -724,19 +719,26 @@ export function InfernalTranslator() {
   );
 }
 
-function WaveformCanvas({ symbols, durationSeconds }: { symbols: number[]; durationSeconds: number }) {
+function WaveformCanvas({
+  symbols,
+  durationSeconds,
+  isPlaying,
+  audioRef,
+}: {
+  symbols: number[];
+  durationSeconds: number;
+  isPlaying: boolean;
+  audioRef: React.RefObject<HTMLAudioElement | null>;
+}) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const drawFnRef = useRef<((currentTime: number) => void) | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) {
-      return;
-    }
+    if (!canvas) return;
 
-    function draw() {
-      if (!canvas) {
-        return;
-      }
+    function draw(currentTime: number) {
+      if (!canvas) return;
 
       const rect = canvas.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
@@ -746,9 +748,7 @@ function WaveformCanvas({ symbols, durationSeconds }: { symbols: number[]; durat
       canvas.height = height;
 
       const context = canvas.getContext("2d");
-      if (!context) {
-        return;
-      }
+      if (!context) return;
 
       context.fillStyle = "#050303";
       context.fillRect(0, 0, width, height);
@@ -770,9 +770,7 @@ function WaveformCanvas({ symbols, durationSeconds }: { symbols: number[]; durat
       }
       context.globalAlpha = 1;
 
-      if (symbols.length === 0) {
-        return;
-      }
+      if (symbols.length === 0) return;
 
       const minFrequency = GIBBERLINK_PROTOCOL.baseFrequencyHz;
       const maxFrequency = frequencyForSymbol(GIBBERLINK_PROTOCOL.symbolCount - 1);
@@ -796,7 +794,6 @@ function WaveformCanvas({ symbols, durationSeconds }: { symbols: number[]; durat
       context.shadowBlur = 12 * dpr;
       context.strokeStyle = "#ff2d20";
       context.beginPath();
-
       const middle = height * 0.5;
       const amplitude = height * 0.22;
       for (let x = 0; x < width; x += 1) {
@@ -805,12 +802,8 @@ function WaveformCanvas({ symbols, durationSeconds }: { symbols: number[]; durat
         const angularTime = (x / width) * durationSeconds;
         const noise = Math.sin(x * 0.017) * amplitude * 0.12;
         const y = middle + Math.sin(Math.PI * 2 * frequency * angularTime) * amplitude + noise;
-
-        if (x === 0) {
-          context.moveTo(x, y);
-        } else {
-          context.lineTo(x, y);
-        }
+        if (x === 0) context.moveTo(x, y);
+        else context.lineTo(x, y);
       }
       context.stroke();
       context.shadowBlur = 0;
@@ -818,14 +811,63 @@ function WaveformCanvas({ symbols, durationSeconds }: { symbols: number[]; durat
       context.fillStyle = "rgba(255,255,255,0.72)";
       context.font = `${11 * dpr}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace`;
       context.fillText(`${symbols.length} symbols · ${formatDuration(durationSeconds)}`, 16 * dpr, 26 * dpr);
+
+      // Playhead
+      if (durationSeconds > 0 && currentTime > 0) {
+        const px = Math.min(width - 1, (currentTime / durationSeconds) * width);
+        context.save();
+        context.strokeStyle = "rgba(255,255,255,0.88)";
+        context.lineWidth = Math.max(1.5, 1.5 * dpr);
+        context.shadowColor = "rgba(255,255,255,0.6)";
+        context.shadowBlur = 8 * dpr;
+        context.beginPath();
+        context.moveTo(px, 0);
+        context.lineTo(px, height);
+        context.stroke();
+        context.restore();
+      }
+
+      // Retro time counter (bottom right)
+      const fmtTime = (s: number) => {
+        const m = Math.floor(s / 60);
+        const sec = Math.floor(s % 60);
+        const ds = Math.floor((s % 1) * 10);
+        return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}.${ds}`;
+      };
+      const timeStr = `${fmtTime(currentTime)} / ${fmtTime(durationSeconds)}`;
+      const fontSize = 11 * dpr;
+      context.font = `bold ${fontSize}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace`;
+      const tw = context.measureText(timeStr).width;
+      const tx = width - tw - 14 * dpr;
+      const ty = height - 10 * dpr;
+      context.fillStyle = "rgba(5,3,3,0.78)";
+      context.fillRect(tx - 6 * dpr, ty - fontSize - 3 * dpr, tw + 12 * dpr, fontSize + 8 * dpr);
+      context.fillStyle = "rgba(220,38,38,0.92)";
+      context.fillText(timeStr, tx, ty);
     }
 
-    const observer = new ResizeObserver(draw);
+    drawFnRef.current = draw;
+
+    const observer = new ResizeObserver(() => draw(audioRef.current?.currentTime ?? 0));
     observer.observe(canvas);
-    draw();
+    draw(0);
 
     return () => observer.disconnect();
-  }, [symbols, durationSeconds]);
+  }, [symbols, durationSeconds, audioRef]);
+
+  useEffect(() => {
+    if (!isPlaying) {
+      drawFnRef.current?.(audioRef.current?.currentTime ?? 0);
+      return;
+    }
+    let rafId: number;
+    const animate = () => {
+      drawFnRef.current?.(audioRef.current?.currentTime ?? 0);
+      rafId = requestAnimationFrame(animate);
+    };
+    rafId = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(rafId);
+  }, [isPlaying, audioRef]);
 
   return <canvas ref={canvasRef} className="min-h-[260px] w-full border border-red-950/80 bg-black" />;
 }
