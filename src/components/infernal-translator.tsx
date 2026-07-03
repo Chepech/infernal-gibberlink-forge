@@ -80,6 +80,17 @@ export function InfernalTranslator() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
 
+  const [uploadId, setUploadId] = useState<string | null>(null);
+  const [uploadBusy, setUploadBusy] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
+  const [uploadExpiry, setUploadExpiry] = useState<string | null>(null);
+  const [uploadPanelOpen, setUploadPanelOpen] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadSummary, setUploadSummary] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
+  const uploadIdRef = useRef<string | null>(null);
+
   const t = messages[locale];
   const selectedSet = useMemo(() => new Set(selectedPaths), [selectedPaths]);
   const selectedFiles = useMemo(
@@ -123,6 +134,15 @@ export function InfernalTranslator() {
     };
   }, []);
 
+  useEffect(() => {
+    return () => {
+      const id = uploadIdRef.current;
+      if (id) {
+        void fetch(`/api/uploads/${id}`, { method: "DELETE" });
+      }
+    };
+  }, []);
+
   function pushEvent(key: MessageKey, detail?: string) {
     setEvents((current) => [{ key, detail }, ...current].slice(0, 8));
   }
@@ -146,6 +166,84 @@ export function InfernalTranslator() {
 
   function clearSelection() {
     setSelectedPaths([]);
+  }
+
+  async function handleUploadFiles(selectedFiles: FileList | File[]) {
+    const fileArray = Array.from(selectedFiles);
+    if (fileArray.length === 0) return;
+
+    setUploadBusy(true);
+    setUploadError(null);
+    setUploadSummary(null);
+    setUploadProgress(null);
+
+    try {
+      // Step 1: Create upload session
+      const createRes = await fetch("/api/uploads/create", { method: "POST" });
+      if (!createRes.ok) {
+        const payload = await safeJson<{ error?: { message?: string } }>(createRes);
+        throw new Error(payload?.error?.message ?? t.uploadError);
+      }
+      const createData = (await createRes.json()) as { uploadId: string; expiresAt: string };
+      const newUploadId = createData.uploadId;
+      setUploadId(newUploadId);
+      uploadIdRef.current = newUploadId;
+      setUploadExpiry(createData.expiresAt);
+
+      // Step 2: Upload files as multipart/form-data
+      setUploadProgress({ done: 0, total: fileArray.length });
+      const formData = new FormData();
+      for (const file of fileArray) {
+        formData.append("file", file, file.name);
+      }
+      const uploadRes = await fetch(`/api/uploads/${newUploadId}/files`, {
+        method: "POST",
+        body: formData,
+      });
+      if (!uploadRes.ok) {
+        const payload = await safeJson<{ error?: { message?: string } }>(uploadRes);
+        throw new Error(payload?.error?.message ?? t.uploadError);
+      }
+      setUploadProgress({ done: fileArray.length, total: fileArray.length });
+
+      // Step 3: Get file list from the upload session
+      const sessionRes = await fetch(`/api/uploads/${newUploadId}`);
+      if (!sessionRes.ok) {
+        const payload = await safeJson<{ error?: { message?: string } }>(sessionRes);
+        throw new Error(payload?.error?.message ?? t.uploadError);
+      }
+      const sessionData = (await sessionRes.json()) as { folder: string; files: LocalTextFile[] };
+
+      // Step 4: Hand off to the existing forge flow
+      setFolder(sessionData.folder);
+      setFiles(sessionData.files);
+      setSelectedPaths(sessionData.files.map((f) => f.path));
+      setSkipped([]);
+      setTranslation(null);
+      stopAudio();
+      revokeAudioUrl();
+
+      const summary = t.uploadFilesReady.replace("{count}", String(sessionData.files.length));
+      setUploadSummary(summary);
+      pushEvent("scanDone", `${sessionData.files.length} ${t.files.toLowerCase()}`);
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : t.uploadError);
+    } finally {
+      setUploadBusy(false);
+    }
+  }
+
+  function clearUpload() {
+    const id = uploadIdRef.current;
+    if (id) {
+      void fetch(`/api/uploads/${id}`, { method: "DELETE" });
+      uploadIdRef.current = null;
+    }
+    setUploadId(null);
+    setUploadExpiry(null);
+    setUploadProgress(null);
+    setUploadSummary(null);
+    setUploadError(null);
   }
 
   async function scanFolder() {
@@ -350,6 +448,109 @@ export function InfernalTranslator() {
 
         <section className="grid gap-6 xl:grid-cols-[0.82fr_1.18fr]">
           <div className="space-y-6">
+            {/* Upload Files panel */}
+            <section className="brutal-panel p-5 sm:p-6">
+              <button
+                className="flex w-full items-center justify-between gap-3"
+                onClick={() => setUploadPanelOpen((prev) => !prev)}
+                aria-expanded={uploadPanelOpen}
+              >
+                <p className="text-xs font-black uppercase tracking-[0.35em] text-red-400">{t.uploadSectionTitle}</p>
+                <span className="text-xs font-black uppercase tracking-widest text-zinc-500">
+                  {uploadPanelOpen ? "▲" : "▼"}
+                </span>
+              </button>
+
+              {uploadPanelOpen ? (
+                <div className="mt-4 space-y-4">
+                  {/* Hidden file inputs */}
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    accept=".txt,.md,.json,.csv"
+                    className="hidden"
+                    onChange={(e) => { if (e.target.files) void handleUploadFiles(e.target.files); e.target.value = ""; }}
+                  />
+                  <input
+                    ref={folderInputRef}
+                    type="file"
+                    // @ts-expect-error — webkitdirectory is non-standard but widely supported
+                    webkitdirectory=""
+                    className="hidden"
+                    onChange={(e) => { if (e.target.files) void handleUploadFiles(e.target.files); e.target.value = ""; }}
+                  />
+
+                  {/* Drop zone */}
+                  <div
+                    className="flex min-h-[120px] cursor-pointer flex-col items-center justify-center gap-3 border border-dashed border-red-900/50 bg-black/40 p-6 text-center transition hover:border-red-700"
+                    onClick={() => fileInputRef.current?.click()}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      if (e.dataTransfer.files.length > 0) void handleUploadFiles(e.dataTransfer.files);
+                    }}
+                  >
+                    <p className="text-sm text-zinc-500">{t.uploadDropHere}</p>
+                    <p className="text-xs text-zinc-600">.txt · .md · .json · .csv</p>
+                  </div>
+
+                  {/* Browse buttons */}
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      className="hell-button min-h-10 px-4 text-sm"
+                      disabled={uploadBusy}
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      {t.uploadBrowse}
+                    </button>
+                    <button
+                      className="micro-button"
+                      disabled={uploadBusy}
+                      onClick={() => folderInputRef.current?.click()}
+                    >
+                      {t.uploadBrowseFolder}
+                    </button>
+                    {uploadId ? (
+                      <button
+                        className="micro-button"
+                        disabled={uploadBusy}
+                        onClick={clearUpload}
+                      >
+                        {t.uploadClear}
+                      </button>
+                    ) : null}
+                  </div>
+
+                  {/* Progress */}
+                  {uploadBusy && uploadProgress ? (
+                    <p className="text-xs font-bold uppercase tracking-widest text-zinc-400">
+                      {t.uploading} {uploadProgress.done} / {uploadProgress.total} {t.files.toLowerCase()}
+                    </p>
+                  ) : null}
+
+                  {/* Success summary */}
+                  {!uploadBusy && uploadSummary ? (
+                    <p className="text-xs font-bold uppercase tracking-widest text-zinc-400">
+                      {t.uploadDone} — {uploadSummary}
+                    </p>
+                  ) : null}
+
+                  {/* Expiry */}
+                  {!uploadBusy && uploadExpiry ? (
+                    <p className="text-xs tracking-widest text-zinc-400">
+                      {t.uploadExpiresAt} {new Date(uploadExpiry).toLocaleTimeString()}
+                    </p>
+                  ) : null}
+
+                  {/* Error */}
+                  {uploadError ? (
+                    <p className="text-xs font-bold text-red-400">{uploadError}</p>
+                  ) : null}
+                </div>
+              ) : null}
+            </section>
+
             <section className="brutal-panel p-5 sm:p-6">
               <label className="text-xs font-black uppercase tracking-[0.35em] text-red-400" htmlFor="folder">
                 {t.folderLabel}

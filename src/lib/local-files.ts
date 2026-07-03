@@ -57,6 +57,19 @@ export function getRuntimeFileConfig(): RuntimeFileConfig {
     path.resolve(root),
   );
 
+  // Determine upload dir and add it to allowed roots so scanTextFiles / readTextDocuments
+  // can access upload paths without further changes.
+  const isDockerContext =
+    process.env.GIBBERLINK_INPUT_DIR === "/data/input" ||
+    defaultFolder === "/data/input";
+  const uploadDir = path.resolve(
+    process.env.GIBBERLINK_UPLOAD_DIR ??
+      (isDockerContext ? "/data/uploads" : path.join(process.cwd(), "uploads")),
+  );
+  if (!allowedRoots.includes(uploadDir)) {
+    allowedRoots.push(uploadDir);
+  }
+
   return {
     defaultFolder,
     allowedRoots,
@@ -215,6 +228,10 @@ async function walkFolder(options: {
   }
 }
 
+export async function resolvePathUnderRoot(inputPath: string, config: RuntimeFileConfig): Promise<string> {
+  return resolveAllowedPath(inputPath, config);
+}
+
 async function resolveAllowedPath(inputPath: string, config: RuntimeFileConfig): Promise<string> {
   const requestedPath = path.resolve(inputPath);
 
@@ -273,6 +290,12 @@ async function createDisplayRelativePath(filePath: string, config: RuntimeFileCo
 
 function isTextFile(filePath: string): boolean {
   return path.extname(filePath).toLowerCase() === ".txt";
+}
+
+const ALLOWED_UPLOAD_EXTENSIONS = new Set([".txt", ".md", ".json", ".csv"]);
+
+export function isAllowedUploadFile(filename: string): boolean {
+  return ALLOWED_UPLOAD_EXTENSIONS.has(path.extname(filename).toLowerCase());
 }
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {

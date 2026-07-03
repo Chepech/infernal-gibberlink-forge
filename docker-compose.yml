@@ -11,6 +11,11 @@ services:
       GIBBERLINK_MAX_FILES: "250"
       GIBBERLINK_MAX_DEPTH: "6"
       GIBBERLINK_MAX_WAV_TEXT_BYTES: "786432"
+      GIBBERLINK_UPLOAD_DIR: /data/uploads
     volumes:
       - ./samples:/data/input:ro
+      - gibberlink-uploads:/data/uploads
     restart: unless-stopped
+
+volumes:
+  gibberlink-uploads:
