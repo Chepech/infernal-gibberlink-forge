@@ -43,3 +43,13 @@ next-env.d.ts
 
 # Playwright MCP test artifacts
 .playwright-mcp/
+
+# OpenNext
+.open-next
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+
+!.env.example
